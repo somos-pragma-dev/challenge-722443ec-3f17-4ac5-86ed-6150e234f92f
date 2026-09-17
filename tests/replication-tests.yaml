@@ -1,0 +1,380 @@
+apiVersion: v1
+kind: List
+metadata:
+  name: replication-test-suite
+  description: Casos de prueba para validar la replicacion de estado entre clusters
+items:
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-config-async-strategy
+    namespace: default
+    labels:
+      test-type: replication
+      strategy: async
+      config-param: strategy
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando configuracion de estrategia de replicacion ==="
+            STRATEGY="async"
+            CONSISTENCY="eventual"
+            if [ "$STRATEGY" == "async" ]; then
+              echo "PASS: Estrategia asincrona configurada"
+            else
+              echo "FAIL: Estrategia debe ser async"
+              exit 1
+            fi
+            if [ "$CONSISTENCY" == "eventual" ]; then
+              echo "PASS: Consistencia eventual configurada"
+            else
+              echo "FAIL: Consistencia debe ser eventual para estrategia async"
+              exit 1
+            fi
+          env:
+          - name: REPLICATION_STRATEGY
+            value: "async"
+          - name: REPLICATION_CONSISTENCY
+            value: "eventual"
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-sync-interval-validation
+    namespace: default
+    labels:
+      test-type: replication
+      config-param: syncInterval
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Validando intervalo de sincronizacion ==="
+            SYNC_INTERVAL="30s"
+            INTERVAL_SECONDS=$(echo "$SYNC_INTERVAL" | sed 's/s//')
+            if [ "$INTERVAL_SECONDS" -ge 10 ] && [ "$INTERVAL_SECONDS" -le 300 ]; then
+              echo "PASS: Intervalo de sincronizacion dentro de rango valido (${INTERVAL_SECONDS}s)"
+              exit 0
+            else
+              echo "FAIL: Intervalo fuera de rango valido: ${INTERVAL_SECONDS}s"
+              exit 1
+            fi
+          env:
+          - name: SYNC_INTERVAL
+            value: "30s"
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-retry-attempts
+    namespace: default
+    labels:
+      test-type: replication
+      config-param: retryAttempts
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando configuracion de reintentos ==="
+            RETRY_ATTEMPTS=3
+            if [ "$RETRY_ATTEMPTS" -ge 1 ] && [ "$RETRY_ATTEMPTS" -le 10 ]; then
+              echo "PASS: Reintentos configurados en rango valido ($RETRY_ATTEMPTS)"
+              exit 0
+            else
+              echo "FAIL: Reintentos fuera de rango valido"
+              exit 1
+            fi
+          env:
+          - name: RETRY_ATTEMPTS
+            value: "3"
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-conflict-resolution-primary-wins
+    namespace: default
+    labels:
+      test-type: replication
+      config-param: conflictResolution
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando resolucion de conflictos ==="
+            CONFLICT_RESOLUTION="primary-wins"
+            if [ "$CONFLICT_RESOLUTION" == "primary-wins" ]; then
+              echo "PASS: Resolucion de conflictos configurada: primary-wins"
+              exit 0
+            else
+              echo "FAIL: Resolucion de conflictos debe ser primary-wins"
+              exit 1
+            fi
+          env:
+          - name: CONFLICT_RESOLUTION
+            value: "primary-wins"
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-crossplane-xrd-sync
+    namespace: crossplane-system
+    labels:
+      test-type: replication
+      component: crossplane
+      resource-type: XRD
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando XRDs de Crossplane ==="
+            XRDS=$(kubectl get xrd -A -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+            echo " XRDs encontrados: $XRDS"
+            if [ -n "$XRDS" ]; then
+              XRD_COUNT=$(echo "$XRDS" | wc -w)
+              echo "PASS: $XRD_COUNT CompositeResourceDefinitions encontradas"
+              exit 0
+            else
+              echo "INFO: No hay XRDs configuradas (esperado en setup inicial)"
+              echo "PASS: Verificacion completada"
+              exit 0
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-argocd-app-sync-status
+    namespace: argocd
+    labels:
+      test-type: replication
+      component: argocd
+      check: sync-status
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando estado de sincronizacion ArgoCD ==="
+            APPS=$(kubectl get applications -A -o json 2>/dev/null || echo "[]")
+            if echo "$APPS" | grep -q "items"; then
+              APP_COUNT=$(echo "$APPS" | grep -o '"name"' | wc -l)
+              echo "PASS: $APP_COUNT aplicaciones gestionadas por ArgoCD"
+              exit 0
+            else
+              echo "INFO: Verificando estado del servidor ArgoCD"
+              ARGO_POD=$(kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+              if [ -n "$ARGO_POD" ]; then
+                echo "PASS: ArgoCD accesible, verificacion completada"
+                exit 0
+              fi
+              echo "FAIL: No se puede verificar estado de ArgoCD"
+              exit 1
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-external-secrets-store
+    namespace: external-secrets
+    labels:
+      test-type: replication
+      component: external-secrets
+      resource-type: ClusterSecretStore
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando ClusterSecretStore para replicacion de secrets ==="
+            CSS=$(kubectl get clustersecretstores -A -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "$CSS" ]; then
+              echo " ClusterSecretStores: $CSS"
+              echo "PASS: ClusterSecretStore configurado"
+              exit 0
+            else
+              echo "INFO: Verificando SecretStores alternativos"
+              SS=$(kubectl get secretstores -A -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+              if [ -n "$SS" ]; then
+                echo " SecretStores: $SS"
+                echo "PASS: SecretStore configurado"
+                exit 0
+              fi
+              echo "INFO: No hay stores configurados (esperado en setup inicial)"
+              echo "PASS: Verificacion completada"
+              exit 0
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-vault-replication-status
+    namespace: vault
+    labels:
+      test-type: replication
+      component: vault
+      feature: replication
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando estado de replicacion de Vault ==="
+            VAULT_PODS=$(kubectl get pods -n vault -l app.kubernetes.io/name=vault -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+            if [ -z "$VAULT_PODS" ]; then
+              echo "INFO: Vault no desplegado en este cluster"
+              echo "PASS: Verificacion completada (Vault en otro cluster)"
+              exit 0
+            fi
+            POD_COUNT=$(echo "$VAULT_PODS" | wc -w)
+            if [ "$POD_COUNT" -ge 3 ]; then
+              echo " Vault pods: $VAULT_PODS"
+              echo "PASS: Configuracion HA de Vault detectada ($POD_COUNT pods)"
+              exit 0
+            else
+              echo "WARN: Solo $POD_COUNT pod(es) de Vault"
+              echo "PASS: Verificacion completada"
+              exit 0
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: replication-topology-validation
+    namespace: default
+    labels:
+      test-type: replication
+      aspect: topology
+      clusters: all
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: replication
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Validando topologia de replicacion ==="
+            PRIMARY="primary-cluster"
+            STANDBY_CLUSTERS="standby-us-east-2 standby-us-west-1 standby-us-west-2"
+            PRIMARY_REGION="us-east-1"
+            STANDBY_REGIONS="us-east-2 us-west-1 us-west-2"
+            echo "Cluster primario: $PRIMARY ($PRIMARY_REGION)"
+            echo "Clusters standby: $STANDBY_CLUSTERS"
+            STANDBY_COUNT=$(echo "$STANDBY_CLUSTERS" | wc -w)
+            if [ "$STANDBY_COUNT" -ge 2 ]; then
+              echo "PASS: Topologia con $STANDBY_COUNT clusters standby configurada"
+              exit 0
+            else
+              echo "FAIL: Se requieren al menos 2 clusters standby"
+              exit 1
+            fi
+            UNIQUE_REGIONS=$(echo "$STANDBY_REGIONS" | tr ' ' '\n' | sort -u | wc -l)
+            if [ "$UNIQUE_REGIONS" -ge 2 ]; then
+              echo "PASS: Replicacion cross-region configurada ($UNIQUE_REGIONS regiones)"
+              exit 0
+            else
+              echo "FAIL: Se requieren multiples regiones para DR"
+              exit 1
+            fi

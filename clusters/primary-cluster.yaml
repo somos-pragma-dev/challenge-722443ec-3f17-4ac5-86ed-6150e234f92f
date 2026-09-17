@@ -1,0 +1,372 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: primary-cluster-infrastructure
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: primary-cluster-infrastructure
+    app.kubernetes.io/part-of: argocd
+    environment: production
+    region: us-east-1
+    cluster-role: primary
+spec:
+  generators:
+    - cluster:
+        values:
+          environment: production
+          region: us-east-1
+          cluster-role: primary
+          replication-enabled: "false"
+          priority: "1"
+          health-check-interval: 10s
+          failover-timeout: 60s
+  template:
+    metadata:
+      name: primary-cluster-{{name}}
+      labels:
+        cluster: primary
+        region: us-east-1
+    spec:
+      project: infrastructure
+      source:
+        - repoURL: https://github.com/org/multi-cluster-gitops-control-plane
+          targetRevision: main
+          path: infrastructure/resources
+          directory:
+            recurse: true
+            jsonnet: {}
+      destination:
+        server: https://primary.k8s.example.com
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: false
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+          - PrunePropagationPolicy=foreground
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: primary-cluster-project
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: primary-cluster-project
+    cluster-role: primary
+    region: us-east-1
+spec:
+  description: Projecto para el cluster primario en us-east-1
+  sourceRepos:
+    - https://github.com/org/multi-cluster-gitops-control-plane
+    - https://github.com/org/multi-cluster-gitops-control-plane-infra
+  destinations:
+    - namespace: argocd
+      server: https://primary.k8s.example.com
+    - namespace: infrastructure
+      server: https://primary.k8s.example.com
+    - namespace: applications
+      server: https://primary.k8s.example.com
+    - namespace: crossplane-system
+      server: https://primary.k8s.example.com
+    - namespace: vault
+      server: https://primary.k8s.example.com
+    - namespace: external-secrets
+      server: https://primary.k8s.example.com
+    - namespace: monitoring
+      server: https://primary.k8s.example.com
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRole
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+    - group: "apiextensions.k8s.io"
+      kind: CustomResourceDefinition
+    - group: "admissionregistration.k8s.io"
+      kind: MutatingWebhookConfiguration
+    - group: "admissionregistration.k8s.io"
+      kind: ValidatingWebhookConfiguration
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Secret
+    - group: "apps"
+      kind: Deployment
+    - group: "apps"
+      kind: StatefulSet
+    - group: "apps"
+      kind: DaemonSet
+    - group: "networking.k8s.io"
+      kind: Ingress
+    - group: "policy"
+      kind: PodDisruptionBudget
+    - group: "crossplane.io"
+      kind: '*'
+    - group: "external-secrets.io"
+      kind: '*'
+  roles:
+    - name: admin
+      description: Rol de administrador para el cluster primario
+      groups:
+        - system:clusteradmins
+        - argocd-admins@company.com
+      policies:
+        - p, proj:primary-cluster-project:admin, *, *, */*, allow
+    - name: operator
+      description: Rol de operador para gestionar aplicaciones
+      groups:
+        - platform-operators@company.com
+      policies:
+        - p, proj:primary-cluster-project:operator, *, get, *, allow
+        - p, proj:primary-cluster-project:operator, *, update, *, allow
+    - name: readonly
+      description: Rol de solo lectura
+      groups:
+        - platform-viewers@company.com
+      policies:
+        - p, proj:primary-cluster-project:readonly, *, get, *, allow
+---
+apiVersion: crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: primary-cluster-aws
+  namespace: crossplane-system
+  labels:
+    cluster: primary
+    region: us-east-1
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: aws-provider-creds
+      key: credentials
+  configuration:
+    region: us-east-1
+  meta:
+    priority: "1"
+    replication-role: primary
+    health-check-url: https://primary.k8s.example.com/healthz
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: primary-cluster-config
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+    cluster-role: primary
+data:
+  cluster.config: |
+    cluster-name: primary-cluster
+    region: us-east-1
+    role: primary
+    priority: 1
+    replication:
+      enabled: false
+      upstream: null
+    healthchecks:
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    failover:
+      enabled: true
+      auto: false
+      timeout: 60s
+      grace-period: 30s
+  cluster.metadata: |
+    k8s-version: "1.28.0"
+    provider: aws
+    node-count: 6
+    node-type: m6i.2xlarge
+    storage-type: gp3
+    vpc-cidr: 10.0.0.0/16
+    vpc-id: vpc-0123456789abcdef0
+    availability-zones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: primary-cluster-credentials
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+type: Opaque
+stringData:
+  server: https://primary.k8s.example.com
+  # Los certificados se gestionan via External Secrets desde AWS Secrets Manager
+  cert-data: |
+    -----BEGIN CERTIFICATE-----
+    # Certificado del API server
+    -----END CERTIFICATE-----
+  # Token de acceso (rotado automaticamente via External Secrets)
+  auth-token: "placeholder-managed-by-external-secrets"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: primary-cluster-secrets
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        secretRef:
+          accessKeyIDRef:
+            name: aws-secrets-manager-access
+            key: access-key-id
+          secretAccessKeyRef:
+            name: aws-secrets-manager-access
+            key: secret-access-key
+  secretSelector:
+    matchLabels:
+      cluster: primary
+      environment: production
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: primary-cluster-argocd-pdb
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-server
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: primary-cluster-argocd-hpa
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: argocd-server
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: primary-cluster-health
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+    purpose: health-check
+spec:
+  type: ClusterIP
+  ports:
+    - name: health
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-server
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: primary-cluster-argocd-monitor
+  namespace: monitoring
+  labels:
+    cluster: primary
+    region: us-east-1
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-server
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+  namespaceSelector:
+    matchNames:
+      - argocd
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: primary-cluster-monitoring
+  namespace: argocd
+  labels:
+    cluster: primary
+    region: us-east-1
+    component: monitoring
+spec:
+  generators:
+    - matrix:
+        generators:
+          - clusters:
+              selector:
+                matchLabels:
+                  cluster: primary
+          - git:
+              repoURL: https://github.com/org/multi-cluster-gitops-control-plane
+              revision: main
+              directories:
+                - path: monitoring/primary/*
+  template:
+    metadata:
+      name: primary-monitoring-{{path.basename}}
+    spec:
+      project: monitoring
+      source:
+        - repoURL: https://github.com/org/multi-cluster-gitops-control-plane
+          targetRevision: main
+          path: monitoring/primary
+      destination:
+        server: https://primary.k8s.example.com
+        namespace: monitoring
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

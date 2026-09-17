@@ -1,0 +1,287 @@
+apiVersion: v1
+kind: List
+metadata:
+  name: health-check-test-suite
+  description: Casos de prueba para validar el script de health-check.sh
+items:
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: health-check-primary-available
+    namespace: default
+    labels:
+      test-type: health-check
+      target-script: health-check.sh
+      cluster-role: primary
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: health-check
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Validando health check para cluster primario ==="
+            SCRIPT_PATH="/scripts/health-check.sh"
+            if [ ! -f "$SCRIPT_PATH" ]; then
+              echo "ERROR: Script health-check.sh no encontrado"
+              exit 1
+            fi
+            chmod +x "$SCRIPT_PATH"
+            OUTPUT=$(bash "$SCRIPT_PATH" 2>&1 || true)
+            echo "Output del script: $OUTPUT"
+            if echo "$OUTPUT" | grep -q "primary-cluster.*healthy"; then
+              echo "PASS: Cluster primario reportado como healthy"
+              exit 0
+            elif echo "$OUTPUT" | grep -q "primary.*UP"; then
+              echo "PASS: Cluster primario UP"
+              exit 0
+            else
+              echo "FAIL: No se detectó estado healthy para cluster primario"
+              exit 1
+            fi
+          env:
+          - name: PRIMARY_CLUSTER
+            value: "primary-cluster"
+          - name: PRIMARY_ENDPOINT
+            value: "https://primary.k8s.example.com"
+          volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+        volumes:
+        - name: scripts
+          configMap:
+            name: health-check-script
+            defaultMode: 0755
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: health-check-standby-available
+    namespace: default
+    labels:
+      test-type: health-check
+      target-script: health-check.sh
+      cluster-role: standby
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: health-check
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Validando health check para clusters standby ==="
+            SCRIPT_PATH="/scripts/health-check.sh"
+            chmod +x "$SCRIPT_PATH"
+            OUTPUT=$(bash "$SCRIPT_PATH" --check-standby 2>&1 || true)
+            echo "Output: $OUTPUT"
+            STANDBY_COUNT=$(echo "$OUTPUT" | grep -c "standby.*UP\|standby.*healthy" || true)
+            if [ "$STANDBY_COUNT" -ge 1 ]; then
+              echo "PASS: Al menos un cluster standby disponible"
+              exit 0
+            else
+              echo "FAIL: Ningun cluster standby disponible"
+              exit 1
+            fi
+          volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+        volumes:
+        - name: scripts
+          configMap:
+            name: health-check-script
+            defaultMode: 0755
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: health-check-argocd-connection
+    namespace: argocd
+    labels:
+      test-type: health-check
+      target-component: argocd
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: health-check
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando conectividad a ArgoCD ==="
+            ARGOCD_POD=$(kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-server -o jsonpath='{.items[0].metadata.name}')
+            if [ -z "$ARGOCD_POD" ]; then
+              echo "ERROR: No se encontró pod de ArgoCD"
+              exit 1
+            fi
+            echo " ArgoCD pod: $ARGOCD_POD"
+            kubectl exec -n argocd "$ARGOCD_POD" -- argocd version --client > /dev/null 2>&1
+            if [ $? -eq 0 ]; then
+              echo "PASS: ArgoCD CLI accesible"
+              exit 0
+            else
+              echo "FAIL: ArgoCD CLI no accesible"
+              exit 1
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: health-check-crossplane-providers
+    namespace: crossplane-system
+    labels:
+      test-type: health-check
+      target-component: crossplane
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: health-check
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando estado de Crossplane providers ==="
+            PROVIDERS=$(kubectl get providers -A -o jsonpath='{.items[*].metadata.name}')
+            echo " Providers encontrados: $PROVIDERS"
+            HEALTHY=$(kubectl get providers -A -o jsonpath='{.items[?(@.status.conditions[0].type=="Ready")].metadata.name}' | wc -w)
+            TOTAL=$(echo "$PROVIDERS" | wc -w)
+            if [ "$HEALTHY" -gt 0 ]; then
+              echo "PASS: $HEALTHY/$TOTAL providers en estado Ready"
+              exit 0
+            else
+              echo "FAIL: Ningun provider en estado Ready"
+              exit 1
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: health-check-vault-accessible
+    namespace: vault
+    labels:
+      test-type: health-check
+      target-component: vault
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: health-check
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando accesibilidad de Vault ==="
+            VAULT_POD=$(kubectl get pods -n vault -l app.kubernetes.io/name=vault -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ -z "$VAULT_POD" ]; then
+              echo "WARN: Vault pod no encontrado, verificando servicio"
+              kubectl get svc -n vault vault > /dev/null 2>&1
+              if [ $? -eq 0 ]; then
+                echo "PASS: Servicio Vault existe"
+                exit 0
+              fi
+              echo "FAIL: Vault no accesible"
+              exit 1
+            fi
+            echo " Vault pod: $VAULT_POD"
+            STATUS=$(kubectl get pod -n vault "$VAULT_POD" -o jsonpath='{.status.phase}')
+            if [ "$STATUS" == "Running" ]; then
+              echo "PASS: Vault en estado Running"
+              exit 0
+            else
+              echo "FAIL: Vault en estado $STATUS"
+              exit 1
+            fi
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: health-check-all-clusters-reachable
+    namespace: default
+    labels:
+      test-type: health-check
+      target-script: health-check.sh
+      scope: full-topology
+  spec:
+    ttlSecondsAfterFinished: 300
+    template:
+      metadata:
+        labels:
+          test-type: health-check
+      spec:
+        serviceAccountName: test-runner
+        restartPolicy: Never
+        containers:
+        - name: test-runner
+          image: bitnami/kubectl:1.28
+          command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            echo "=== Verificando todos los clusters ==="
+            SCRIPT_PATH="/scripts/health-check.sh"
+            chmod +x "$SCRIPT_PATH"
+            OUTPUT=$(bash "$SCRIPT_PATH" --all 2>&1 || true)
+            echo "Output: $OUTPUT"
+            CLUSTERS=("primary-cluster" "standby-us-east-2" "standby-us-west-1" "standby-us-west-2")
+            REACHABLE=0
+            for cluster in "${CLUSTERS[@]}"; do
+              if echo "$OUTPUT" | grep -q "$cluster.*UP\|$cluster.*healthy"; then
+                REACHABLE=$((REACHABLE + 1))
+              fi
+            done
+            if [ "$REACHABLE" -ge 3 ]; then
+              echo "PASS: $REACHABLE/4 clusters alcanzables"
+              exit 0
+            else
+              echo "FAIL: Solo $REACHABLE/4 clusters alcanzables"
+              exit 1
+            fi
+          volumeMounts:
+          - name: scripts
+            mountPath: /scripts
+        volumes:
+        - name: scripts
+          configMap:
+            name: health-check-script
+            defaultMode: 0755

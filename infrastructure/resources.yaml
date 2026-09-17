@@ -1,0 +1,402 @@
+apiVersion: database.rds.upbound.io/v1beta1
+kind: Instance
+metadata:
+  name: primary-postgres
+  namespace: crossplane-system
+  labels:
+    environment: production
+    region: us-east-1
+    cluster: primary
+    role: primary
+    database-type: postgres
+spec:
+  forProvider:
+    region: us-east-1
+    engine: postgres
+    engineVersion: "15.4"
+    instanceClass: db.r6g.xlarge
+    allocatedStorage: 100
+    maxAllocatedStorage: 500
+    storageType: gp3
+    storageEncrypted: true
+    multiAz: true
+    dbName: controlplane
+    masterUsername: dbadmin
+    masterPasswordSecretRef:
+      namespace: vault
+      name: database-credentials
+      key: password
+    backupRetentionPeriod: 30
+    backupWindow: "03:00-04:00"
+    maintenanceWindow: "mon:04:00-mon:05:00"
+    publiclyAccessible: false
+    vpcSecurityGroupIDRefs:
+      - name: rds-security-group
+    dbSubnetGroupName: primary-db-subnet-group
+    enabledCloudwatchLogsExports:
+      - postgresql
+      - upgrade
+    parameterGroupName: postgres-15-optimized
+    optionGroupName: postgres-15-options
+    tags:
+      Name: primary-postgres
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+  writeConnectionSecretToRef:
+    namespace: crossplane-system
+    name: primary-postgres-conn
+---
+apiVersion: database.rds.upbound.io/v1beta1
+kind: Instance
+metadata:
+  name: standby-postgres-us-east-2
+  namespace: crossplane-system
+  labels:
+    environment: production
+    region: us-east-2
+    cluster: standby-us-east-2
+    role: standby
+    database-type: postgres
+spec:
+  forProvider:
+    region: us-east-2
+    engine: postgres
+    engineVersion: "15.4"
+    instanceClass: db.r6g.xlarge
+    allocatedStorage: 100
+    maxAllocatedStorage: 500
+    storageType: gp3
+    storageEncrypted: true
+    multiAz: false
+    dbName: controlplane
+    masterUsername: dbadmin
+    masterPasswordSecretRef:
+      namespace: vault
+      name: database-credentials
+      key: password
+    backupRetentionPeriod: 30
+    publiclyAccessible: false
+    vpcSecurityGroupIDRefs:
+      - name: rds-security-group-standby
+    dbSubnetGroupName: standby-db-subnet-group-us-east-2
+    enabledCloudwatchLogsExports:
+      - postgresql
+    parameterGroupName: postgres-15-optimized
+    tags:
+      Name: standby-postgres-us-east-2
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-standby-us-east-2
+  writeConnectionSecretToRef:
+    namespace: crossplane-system
+    name: standby-postgres-us-east-2-conn
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: control-plane-state
+  namespace: crossplane-system
+  labels:
+    environment: production
+    region: us-east-1
+    cluster: primary
+    purpose: state-storage
+spec:
+  forProvider:
+    region: us-east-1
+    bucket: control-plane-state-us-east-1
+    acl: private
+    versioning:
+      enabled: true
+    serverSideEncryptionConfiguration:
+      rule:
+        applyServerSideEncryptionByDefault:
+          sseAlgorithm: AES256
+    lifecycleRule:
+      - id: archive-old-versions
+        status: Enabled
+        noncurrentVersionTransition:
+          - noncurrentDays: 30
+            storageClass: GLACIER
+        noncurrentVersionExpiration:
+          noncurrentDays: 90
+    tags:
+      Name: control-plane-state
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: cluster-backups
+  namespace: crossplane-system
+  labels:
+    environment: production
+    region: us-east-1
+    cluster: primary
+    purpose: backup-storage
+spec:
+  forProvider:
+    region: us-east-1
+    bucket: cluster-backups-${ACCOUNT_ID}
+    acl: private
+    versioning:
+      enabled: true
+    serverSideEncryptionConfiguration:
+      rule:
+        applyServerSideEncryptionByDefault:
+          sseAlgorithm: AES256
+    lifecycleRule:
+      - id: archive-old-backups
+        status: Enabled
+        expirationInDays: 90
+        transition:
+          - days: 7
+            storageClass: STANDARD_IA
+          - days: 30
+            storageClass: GLACIER
+    tags:
+      Name: cluster-backups
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: artifacts-repository
+  namespace: crossplane-system
+  labels:
+    environment: production
+    region: us-east-1
+    cluster: primary
+    purpose: artifacts
+spec:
+  forProvider:
+    region: us-east-1
+    bucket: artifacts-repository-${ACCOUNT_ID}
+    acl: private
+    versioning:
+      enabled: true
+    serverSideEncryptionConfiguration:
+      rule:
+        applyServerSideEncryptionByDefault:
+          sseAlgorithm: AWS_KMS
+          kmsKeyIdRef:
+            name: artifacts-kms-key
+    corsRule:
+      - allowedHeaders: ["*"]
+        allowedMethods: ["GET", "PUT", "POST"]
+        allowedOrigins: ["https://*.example.com"]
+        maxAge: 3600
+    tags:
+      Name: artifacts-repository
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: iam.aws.upbound.io/v1beta1
+kind: Role
+metadata:
+  name: eks-cluster-role
+  namespace: crossplane-system
+  labels:
+    environment: production
+    cluster: primary
+    purpose: eks-workload
+spec:
+  forProvider:
+    name: EKSClusterRole
+    assumeRolePolicy: |-
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "eks.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    tags:
+      Name: EKSClusterRole
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: iam.aws.upbound.io/v1beta1
+kind: Policy
+metadata:
+  name: node-group-policy
+  namespace: crossplane-system
+  labels:
+    environment: production
+    cluster: primary
+    purpose: eks-node-group
+spec:
+  forProvider:
+    name: NodeGroupPolicy
+    policy: |-
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "ec2:Describe*",
+              "ec2:AttachVolume",
+              "ec2:DetachVolume",
+              "s3:GetObject",
+              "s3:PutObject",
+              "s3:DeleteObject"
+            ],
+            "Resource": "*"
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogGroup",
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:*"
+          }
+        ]
+      }
+    tags:
+      Name: NodeGroupPolicy
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: iam.aws.upbound.io/v1beta1
+kind: RolePolicyAttachment
+metadata:
+  name: node-group-role-attachment
+  namespace: crossplane-system
+  labels:
+    environment: production
+    cluster: primary
+    purpose: eks-node-group
+spec:
+  forProvider:
+    roleNameRef:
+      name: eks-node-group-role
+    policyArnRef:
+      name: node-group-policy
+  providerConfigRef:
+    name: aws-primary
+  deletionPolicy: Orphanar
+---
+apiVersion: ec2.aws.upbound.io/v1beta1
+kind: VPC
+metadata:
+  name: primary-vpc
+  namespace: crossplane-system
+  labels:
+    environment: production
+    region: us-east-1
+    cluster: primary
+    network-type: primary
+spec:
+  forProvider:
+    region: us-east-1
+    cidrBlock: 10.0.0.0/16
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    instanceTenancy: default
+    tags:
+      Name: primary-vpc
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: ec2.aws.upbound.io/v1beta1
+kind: SecurityGroup
+metadata:
+  name: eks-control-plane-sg
+  namespace: crossplane-system
+  labels:
+    environment: production
+    cluster: primary
+    purpose: eks-control-plane
+spec:
+  forProvider:
+    region: us-east-1
+    name: eks-control-plane-sg
+    vpcIdRef:
+      name: primary-vpc
+    ingressRule:
+      - id: https
+        description: HTTPS from anywhere
+        fromPort: 443
+        toPort: 443
+        protocol: tcp
+        cidrBlocks: ["0.0.0.0/0"]
+      - id: health-checks
+        description: Health check traffic
+        fromPort: 10250
+        toPort: 10250
+        protocol: tcp
+        sourceSecurityGroupIdRefs:
+          - name: eks-node-sg
+    egressRule:
+      - id: allow-all
+        description: Allow all outbound
+        fromPort: 0
+        toPort: 0
+        protocol: -1
+        cidrBlocks: ["0.0.0.0/0"]
+    tags:
+      Name: eks-control-plane-sg
+      Managed-By: Crossplane
+      Environment: production
+  providerConfigRef:
+    name: aws-primary
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infrastructure-status
+  namespace: crossplane-system
+  labels:
+    app: crossplane
+    component: status
+data:
+  status.yaml: |-
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: infrastructure-resources
+    data:
+      databases: |
+        - name: primary-postgres
+          status: Ready
+          endpoint: primary-postgres.xxxx.us-east-1.rds.amazonaws.com
+          port: 5432
+        - name: standby-postgres-us-east-2
+          status: Ready
+          endpoint: standby-postgres-us-east-2.xxxx.us-east-2.rds.amazonaws.com
+          port: 5432
+      buckets: |
+        - name: control-plane-state
+          region: us-east-1
+          status: Ready
+        - name: cluster-backups
+          region: us-east-1
+          status: Ready
+        - name: artifacts-repository
+          region: us-east-1
+          status: Ready

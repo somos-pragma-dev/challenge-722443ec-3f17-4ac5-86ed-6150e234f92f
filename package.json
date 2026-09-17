@@ -1,0 +1,137 @@
+{
+  "name": "multi-cluster-gitops-control-plane",
+  "version": "1.0.0",
+  "description": "Control plane multi-cluster con GitOps y disaster recovery cross-region",
+  "main": "index.js",
+  "scripts": {
+    "validate:clusters": "bash scripts/validate-cluster-configs.sh",
+    "validate:infra": "bash scripts/validate-infrastructure.sh",
+    "validate:apps": "bash scripts/validate-applications.sh",
+    "health:all": "bash scripts/health-check.sh",
+    "failover:dry-run": "bash scripts/failover-logic.sh --dry-run",
+    "failover:execute": "bash scripts/failover-logic.sh --execute",
+    "test:health": "kubectl apply -f tests/health-check-tests.yaml",
+    "test:failover": "kubectl apply -f tests/failover-tests.yaml",
+    "test:replication": "kubectl apply -f tests/replication-tests.yaml",
+    "deploy:argocd": "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.10.0/manifests/install.yaml",
+    "deploy:crossplane": "helm install crossplane crossplane-stable/crossplane --version 1.14.0 --namespace crossplane-system --create-namespace",
+    "deploy:vault": "helm install vault hashicorp/vault --version 0.25.0 --namespace vault --create-namespace",
+    "sync:apps": "argocd app sync -l app.kubernetes.io/instance=argocd",
+    "sync:infra": "argocd app sync infrastructure",
+    "cleanup:all": "bash scripts/cleanup.sh"
+  },
+  "keywords": [
+    "kubernetes",
+    "argocd",
+    "crossplane",
+    "gitops",
+    "multi-cluster",
+    "disaster-recovery",
+    "aws",
+    "vault",
+    "external-secrets",
+    "federated-rbac"
+  ],
+  "author": "Architecture Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/org/multi-cluster-control-plane"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "kubectl": ">=1.28.0",
+    "helm": ">=3.12.0",
+    "awscli": ">=2.15.0"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^0.20.0",
+    "js-yaml": "^4.1.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  },
+  "config": {
+    "cluster": {
+      "primary": {
+        "name": "primary-cluster",
+        "region": "us-east-1",
+        "endpoint": "https://primary.k8s.example.com",
+        "version": "1.28.0"
+      },
+      "standby": [
+        {
+          "name": "standby-us-east-2",
+          "region": "us-east-2",
+          "endpoint": "https://standby-us-east-2.k8s.example.com",
+          "version": "1.28.0"
+        },
+        {
+          "name": "standby-us-west-1",
+          "region": "us-west-1",
+          "endpoint": "https://standby-us-west-1.k8s.example.com",
+          "version": "1.28.0"
+        },
+        {
+          "name": "standby-us-west-2",
+          "region": "us-west-2",
+          "endpoint": "https://standby-us-west-2.k8s.example.com",
+          "version": "1.28.0"
+        }
+      ]
+    },
+    "argocd": {
+      "version": "2.10.0",
+      "namespace": "argocd",
+      "admin.enabled": true,
+      "server.service.type": "LoadBalancer",
+      "repo.server.autotls": "env",
+      "applicationSet.enabled": true,
+      "applicationSet.namespaces": ["argocd", "applications"]
+    },
+    "crossplane": {
+      "version": "1.14.0",
+      "namespace": "crossplane-system",
+      "provider-aws": {
+        "version": "v0.47.0",
+        "package": "xref://index.upbound.io/master/crossplane/provider-aws:v0.47.0"
+      }
+    },
+    "vault": {
+      "version": "1.15.0",
+      "namespace": "vault",
+      "injector.enabled": true,
+      "server.ha.enabled": true,
+      "server.ha.replicas": 3
+    },
+    "external-secrets": {
+      "version": "0.9.0",
+      "namespace": "external-secrets",
+      "operator": {
+        "version": "0.9.0"
+      },
+      "clusteroesint-store": {
+        "backend": "aws-secrets-manager",
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "replication": {
+      "strategy": "async",
+      "consistency": "eventual",
+      "syncInterval": "30s",
+      "retryAttempts": 3,
+      "conflictResolution": "primary-wins"
+    },
+    "failover": {
+      "healthCheckInterval": "10s",
+      "failoverTimeout": "60s",
+      "gracePeriod": "30s",
+      "autoFailover": false,
+      "notificationChannels": ["slack", "pagerduty"]
+    }
+  }
+}

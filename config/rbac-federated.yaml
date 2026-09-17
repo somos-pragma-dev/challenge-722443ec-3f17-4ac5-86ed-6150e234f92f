@@ -1,0 +1,224 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-cluster-platform-admin
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    app.kubernetes.io/component: rbac
+    rbac.aggregateTo: "true"
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+  - nonResourceURLs: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-cluster-infra-manager
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: ["crossplane.io"]
+    resources: ["*compositions*", "*providerconfigs*", "*usages*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings", "roles"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applicationsets", "applications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-cluster-application-operator
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applicationsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-cluster-viewer
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["*"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-cluster-disaster-recovery
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    app.kubernetes.io/component: rbac
+    rbac.disaster-recovery: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "sync"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "list", "watch"]
+---
+# ClusterRoleBinding para el cluster primario
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-admin-primary-binding
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    cluster-type: primary
+subjects:
+  - kind: Group
+    name: org-engineering:platform
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multi-cluster-platform-admin
+---
+# ClusterRoleBinding para clusters standby
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infra-manager-standby-binding
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    cluster-type: standby
+subjects:
+  - kind: Group
+    name: org-sre:sre-team
+    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: crossplane-provider-aws
+    namespace: crossplane-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multi-cluster-infra-manager
+---
+# ClusterRoleBinding federado para aplicaciones
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: app-operator-federated-binding
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    federation: cross-cluster
+subjects:
+  - kind: Group
+    name: org-engineering:devops
+    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multi-cluster-application-operator
+---
+# ClusterRoleBinding para DR
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: disaster-recovery-binding
+  labels:
+    app.kubernetes.io/name: rbac-federated
+    dr-role: "true"
+subjects:
+  - kind: ServiceAccount
+    name: failover-controller
+    namespace: platform-system
+  - kind: Group
+    name: org-sre:sre-team
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multi-cluster-disaster-recovery
+---
+# Rol de namespace para desarrollo
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer-namespace-role
+  namespace: applications
+  labels:
+    app.kubernetes.io/name: rbac-federated
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+---
+# RoleBinding para desarrolladores en namespace applications
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-namespace-binding
+  namespace: applications
+  labels:
+    app.kubernetes.io/name: rbac-federated
+subjects:
+  - kind: Group
+    name: org-engineering:developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: developer-namespace-role
+---

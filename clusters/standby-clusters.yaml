@@ -1,0 +1,453 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: standby-clusters-infrastructure
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: standby-clusters-infrastructure
+    app.kubernetes.io/part-of: argocd
+    environment: production
+    cluster-role: standby
+spec:
+  generators:
+    - cluster:
+        selector:
+          matchLabels:
+            cluster-role: standby
+        values:
+          environment: production
+          cluster-role: standby
+          replication-enabled: "true"
+          priority: "2"
+          health-check-interval: 10s
+          failover-timeout: 60s
+  template:
+    metadata:
+      name: standby-{{name}}-infrastructure
+      labels:
+        cluster: "{{name}}"
+        cluster-role: standby
+        region: "{{values.region}}"
+    spec:
+      project: infrastructure
+      source:
+        - repoURL: https://github.com/org/multi-cluster-gitops-control-plane
+          targetRevision: main
+          path: infrastructure/resources
+          directory:
+            recurse: true
+      destination:
+        server: "{{values.endpoint}}"
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: false
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: standby-clusters-project
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: standby-clusters-project
+    cluster-role: standby
+spec:
+  description: Proyecto para clusters standby - replica del primario
+  sourceRepos:
+    - https://github.com/org/multi-cluster-gitops-control-plane
+    - https://github.com/org/multi-cluster-gitops-control-plane-infra
+  destinations:
+    - namespace: argocd
+      server: https://standby-us-east-2.k8s.example.com
+    - namespace: argocd
+      server: https://standby-us-west-1.k8s.example.com
+    - namespace: argocd
+      server: https://standby-us-west-2.k8s.example.com
+    - namespace: infrastructure
+      server: "*"
+    - namespace: applications
+      server: "*"
+    - namespace: crossplane-system
+      server: "*"
+    - namespace: vault
+      server: "*"
+    - namespace: external-secrets
+      server: "*"
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRole
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+    - group: "apiextensions.k8s.io"
+      kind: CustomResourceDefinition
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Secret
+    - group: "apps"
+      kind: Deployment
+    - group: "apps"
+      kind: StatefulSet
+    - group: "networking.k8s.io"
+      kind: Ingress
+    - group: "crossplane.io"
+      kind: '*'
+    - group: "external-secrets.io"
+      kind: '*'
+  roles:
+    - name: admin
+      description: Rol de administrador para clusters standby
+      groups:
+        - system:clusteradmins
+        - argocd-admins@company.com
+      policies:
+        - p, proj:standby-clusters-project:admin, *, *, */*, allow
+    - name: replication-operator
+      description: Rol para operadores de replicacion
+      groups:
+        - platform-operators@company.com
+      policies:
+        - p, proj:standby-clusters-project:replication-operator, *, get, *, allow
+        - p, proj:standby-clusters-project:replication-operator, *, update, *, allow
+        - p, proj:standby-clusters-project:replication-operator, applications, create, *, allow
+---
+apiVersion: crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: standby-clusters-aws
+  namespace: crossplane-system
+  labels:
+    cluster-role: standby
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: aws-provider-creds-standby
+      key: credentials
+  configuration:
+    region: "{{values.region}}"
+  meta:
+    priority: "2"
+    replication-role: standby
+    health-check-url: "{{values.health-check-url}}"
+    upstream-cluster: primary-cluster
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: standby-clusters-config
+  namespace: argocd
+  labels:
+    cluster-role: standby
+data:
+  cluster.config: |
+    cluster-role: standby
+    replication:
+      enabled: true
+      strategy: async
+      consistency: eventual
+      sync-interval: 30s
+      retry-attempts: 3
+      conflict-resolution: primary-wins
+      upstream: primary-cluster
+    healthchecks:
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      endpoint: /healthz
+    failover:
+      enabled: true
+      auto: false
+      timeout: 60s
+      grace-period: 30s
+      promotion-candidates:
+        - standby-us-east-2
+        - standby-us-west-1
+        - standby-us-west-2
+  cluster.list: |
+    clusters:
+      - name: standby-us-east-2
+        region: us-east-2
+        priority: 2
+        endpoint: https://standby-us-east-2.k8s.example.com
+        health-check-url: https://standby-us-east-2.k8s.example.com/healthz
+        availability-zones:
+          - us-east-2a
+          - us-east-2b
+          - us-east-2c
+      - name: standby-us-west-1
+        region: us-west-1
+        priority: 3
+        endpoint: https://standby-us-west-1.k8s.example.com
+        health-check-url: https://standby-us-west-1.k8s.example.com/healthz
+        availability-zones:
+          - us-west-1a
+          - us-west-1b
+      - name: standby-us-west-2
+        region: us-west-2
+        priority: 4
+        endpoint: https://standby-us-west-2.k8s.example.com
+        health-check-url: https://standby-us-west-2.k8s.example.com/healthz
+        availability-zones:
+          - us-west-2a
+          - us-west-2b
+          - us-west-2c
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: standby-clusters-credentials
+  namespace: argocd
+  labels:
+    cluster-role: standby
+type: Opaque
+stringData:
+  # Configuracion de credenciales para cada cluster standby
+  # Gestionado via External Secrets desde AWS Secrets Manager
+  standby-us-east-2.server: https://standby-us-east-2.k8s.example.com
+  standby-us-west-1.server: https://standby-us-west-1.k8s.example.com
+  standby-us-west-2.server: https://standby-us-west-2.k8s.example.com
+  credentials-reference: "placeholder-managed-by-external-secrets"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: standby-clusters-secrets
+  namespace: argocd
+  labels:
+    cluster-role: standby
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        secretRef:
+          accessKeyIDRef:
+            name: aws-secrets-manager-access
+            key: access-key-id
+          secretAccessKeyRef:
+            name: aws-secrets-manager-access
+            key: secret-access-key
+  secretSelector:
+    matchLabels:
+      cluster-role: standby
+      environment: production
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: replication-config
+  namespace: argocd
+  labels:
+    component: replication
+    cluster-role: standby
+data:
+  replication.yaml: |
+    apiVersion: v1
+    kind: ReplicationConfiguration
+    metadata:
+      name: cross-region-replication
+    spec:
+      strategy: async
+      consistency: eventual
+      syncInterval: 30s
+      retryAttempts: 3
+      conflictResolution: primary-wins
+      resources:
+        - kind: Application
+          apiVersion: argoproj.io/v1alpha1
+          syncMode: foreground
+        - kind: ConfigMap
+          apiVersion: v1
+          syncMode: merge
+        - kind: Secret
+          apiVersion: v1
+          syncMode: secret
+          encryptionRequired: true
+        - kind: AppProject
+          apiVersion: argoproj.io/v1alpha1
+          syncMode: foreground
+  topology.yaml: |
+    apiVersion: v1
+    kind: ReplicationTopology
+    metadata:
+      name: multi-region-topology
+    spec:
+      primary:
+        cluster: primary-cluster
+        region: us-east-1
+        writeEndpoint: https://primary.k8s.example.com
+      standbys:
+        - cluster: standby-us-east-2
+          region: us-east-2
+          priority: 2
+          readEndpoint: https://standby-us-east-2.k8s.example.com
+        - cluster: standby-us-west-1
+          region: us-west-1
+          priority: 3
+          readEndpoint: https://standby-us-west-1.k8s.example.com
+        - cluster: standby-us-west-2
+          region: us-west-2
+          priority: 4
+          readEndpoint: https://standby-us-west-2.k8s.example.com
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: standby-clusters-health
+  namespace: argocd
+  labels:
+    cluster-role: standby
+    purpose: health-check
+spec:
+  type: ClusterIP
+  ports:
+    - name: health
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+    - name: replication
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: argocd-server
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: standby-clusters-argocd-pdb
+  namespace: argocd
+  labels:
+    cluster-role: standby
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-server
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: standby-clusters-monitoring
+  namespace: argocd
+  labels:
+    cluster-role: standby
+    component: monitoring
+spec:
+  generators:
+    - matrix:
+        generators:
+          - clusters:
+              selector:
+                matchLabels:
+                  cluster-role: standby
+          - git:
+              repoURL: https://github.com/org/multi-cluster-gitops-control-plane
+              revision: main
+              directories:
+                - path: monitoring/standby/*
+  template:
+    metadata:
+      name: standby-monitoring-{{name}}
+    spec:
+      project: monitoring
+      source:
+        - repoURL: https://github.com/org/multi-cluster-gitops-control-plane
+          targetRevision: main
+          path: monitoring/standby
+      destination:
+        server: "{{server}}"
+        namespace: monitoring
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: failover-config
+  namespace: argocd
+  labels:
+    component: failover
+    cluster-role: standby
+data:
+  failover-policy.yaml: |
+    apiVersion: v1
+    kind: FailoverPolicy
+    metadata:
+      name: automatic-failover-policy
+    spec:
+      enabled: false
+      mode: manual
+      healthCheckInterval: 10s
+      failoverTimeout: 60s
+      gracePeriod: 30s
+      preFailoverChecks:
+        - name: cluster-reachable
+          type: http
+          endpoint: /healthz
+          timeout: 5s
+        - name: data-replicated
+          type: state
+          resource: ReplicationStatus
+          condition: synced
+        - name: capacity-available
+          type: capacity
+          threshold: 80%
+      postFailoverActions:
+        - type: notification
+          channel: slack
+          message: "Failover executed from {{failedCluster}} to {{promotedCluster}}"
+        - type: notification
+          channel: pagerduty
+          severity: critical
+        - type: dns-update
+          record: primary.k8s.example.com
+          target: {{promotedClusterEndpoint}}
+      rollbackPolicy:
+        enabled: true
+        timeout: 300s
+        maxRetries: 3
+  promotion-order.yaml: |
+    apiVersion: v1
+    kind: PromotionOrder
+    metadata:
+      name: cluster-promotion-order
+    spec:
+      order:
+        - cluster: standby-us-east-2
+          region: us-east-2
+          priority: 1
+          weight: 100
+        - cluster: standby-us-west-1
+          region: us-west-1
+          priority: 2
+          weight: 80
+        - cluster: standby-us-west-2
+          region: us-west-2
+          priority: 3
+          weight: 60

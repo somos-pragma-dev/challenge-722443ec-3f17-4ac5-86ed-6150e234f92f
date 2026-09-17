@@ -1,0 +1,558 @@
+# Configuración de AWS para el control plane multi-cluster
+# Este archivo define la infraestructura AWS necesaria para gestionar
+# los clusters Kubernetes y sus recursos cross-region.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-control-plane-config
+  namespace: infrastructure
+  labels:
+    app.kubernetes.io/name: aws-config
+    app.kubernetes.io/component: infrastructure
+    app.kubernetes.io/part-of: multi-cluster-control-plane
+data:
+  # Configuración global de AWS
+  config.yaml: |
+    global:
+      organization: "acme-corp"
+      environment: "production"
+      cost-center: "platform-engineering"
+      
+    # Cuentas AWS por entorno
+    accounts:
+      primary:
+        id: "123456789012"
+        name: "primary-production"
+        region: "us-east-1"
+        role: "production"
+        vpc-cidr: "10.0.0.0/16"
+        azs:
+          - "us-east-1a"
+          - "us-east-1b"
+          - "us-east-1c"
+        
+      standby-east:
+        id: "123456789013"
+        name: "standby-us-east-2"
+        region: "us-east-2"
+        role: "disaster-recovery"
+        vpc-cidr: "10.1.0.0/16"
+        azs:
+          - "us-east-2a"
+          - "us-east-2b"
+          - "us-east-2c"
+          
+      standby-west:
+        id: "123456789014"
+        name: "standby-us-west-1"
+        region: "us-west-1"
+        role: "disaster-recovery"
+        vpc-cidr: "10.2.0.0/16"
+        azs:
+          - "us-west-1a"
+          - "us-west-1b"
+          
+      standby-west-2:
+        id: "123456789015"
+        name: "standby-us-west-2"
+        region: "us-west-2"
+        role: "disaster-recovery"
+        vpc-cidr: "10.3.0.0/16"
+        azs:
+          - "us-west-2a"
+          - "us-west-2b"
+          - "us-west-2c"
+    
+    # Configuración de VPC Peering para replicación cross-account
+    networking:
+      peering:
+        primary-to-standby-east:
+          requester-vpc: "vpc-primary"
+          acceptor-vpc: "vpc-standby-east"
+          auto-accept: true
+          routes:
+            - destination-cidr-block: "10.1.0.0/16"
+              
+        primary-to-standby-west:
+          requester-vpc: "vpc-primary"
+          acceptor-vpc: "vpc-standby-west"
+          auto-accept: true
+          routes:
+            - destination-cidr-block: "10.2.0.0/16"
+              
+        primary-to-standby-west-2:
+          requester-vpc: "vpc-primary"
+          acceptor-vpc: "vpc-standby-west-2"
+          auto-accept: true
+          routes:
+            - destination-cidr-block: "10.3.0.0/16"
+    
+    # Transit Gateway para conectividad centralizada
+      transit-gateway:
+        name: "multi-cluster-tgw"
+        amazon-asn: 64512
+        attachment-transit-gateway: true
+        auto-accept-shared-attachments: true
+        default-route-table-association: true
+        default-route-table-propagation: true
+        dns-support: "enable"
+        vpn-ecmp-support: "enable"
+    
+    # Configuración de PrivateLink para servicios internos
+    private-link:
+      endpoints:
+        - service: "ec2"
+          interfaces: 3
+        - service: "s3"
+          interfaces: 1
+          # S3 VPC endpoint usa gateway, no interface
+          type: "gateway"
+        - service: "secretsmanager"
+          interfaces: 2
+        - service: "ssm"
+          interfaces: 3
+        - service: "sts"
+          interfaces: 1
+
+---
+# Políticas IAM para el control plane
+# Estas políticas definen los permisos necesarios para que los componentes
+# del control plane interactúen con los recursos de AWS.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-iam-policies
+  namespace: infrastructure
+  labels:
+    app.kubernetes.io/name: aws-iam-policies
+    app.kubernetes.io/component: security
+type: Opaque
+stringData:
+  # Política para el cluster primary - EKS Cluster Role
+  eks-cluster-role-policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DescribeVpcs",
+            "ec2:DescribeSubnets",
+            "ec2:DescribeSecurityGroups",
+            "ec2:DescribeNetworkInterfaces",
+            "ec2:DescribeInstances",
+            "ec2:CreateTags",
+            "ec2:CreateVolume",
+            "ec2:AttachVolume"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "eks:DescribeCluster",
+            "eks:ListClusters",
+            "eks:DescribeUpdate",
+            "eks:ListUpdates"
+          ],
+          "Resource": "arn:aws:eks:us-east-1:123456789012:cluster/*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "iam:ListRoles",
+            "iam:GetRole",
+            "iam:CreateRole",
+            "iam:DeleteRole",
+            "iam:AttachRolePolicy",
+            "iam:DetachRolePolicy"
+          ],
+          "Resource": "arn:aws:iam::123456789012:role/eks-*"
+        }
+      ]
+    }
+  
+  # Política para nodos worker - EKS Node Group Role
+  eks-node-role-policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DescribeInstances",
+            "ec2:DescribeInstanceTypes",
+            "ec2:DescribeVpcEndpoints",
+            "ec2:DescribeSecurityGroups",
+            "ec2:DescribeSubnets"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:CreateTags",
+            "ec2:RunInstances",
+            "ec2:TerminateInstances",
+            "ec2:DescribeTags"
+          ],
+          "Resource": "arn:aws:ec2:us-east-1:123456789012:instance/*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "eks:DescribeCluster",
+            "eks:ListClusters"
+          ],
+          "Resource": "arn:aws:eks:us-east-1:123456789012:cluster/*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "iam:GetRole",
+            "iam:ListAttachedRolePolicies"
+          ],
+          "Resource": "arn:aws:iam::123456789012:role/eks-node-*"
+        }
+      ]
+    }
+  
+  # Política para Crossplane - provee acceso a recursos AWS
+  crossplane-provider-policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:*",
+            "elasticloadbalancing:*",
+            "autoscaling:*",
+            "rds:*",
+            "dynamodb:*",
+            "s3:*",
+            "secretsmanager:*",
+            "kms:*",
+            "iam:*",
+            "sts:*"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Effect": "Deny",
+          "Action": [
+            "iam:DeleteUser",
+            "iam:DeleteRole",
+            "iam:DeletePolicy",
+            "secretsmanager:DeleteSecret",
+            "s3:DeleteBucket"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "BoolIfExists": {
+              "aws:PrincipalIsAWSService": "false"
+            }
+          }
+        }
+      ]
+    }
+  
+  # Política para Vault - acceso a Secrets Manager
+  vault-secrets-policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret",
+            "secretsmanager:ListSecrets"
+          ],
+          "Resource": [
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:control-plane/*",
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:argocd/*",
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:kubernetes/*"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:PutSecretValue",
+            "secretsmanager:UpdateSecret"
+          ],
+          "Resource": [
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:control-plane/*"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:DescribeKey"
+          ],
+          "Resource": "arn:aws:kms:us-east-1:123456789012:key/*"
+        }
+      ]
+    }
+  
+  # Política para External Secrets Operator
+  external-secrets-policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret"
+          ],
+          "Resource": "arn:aws:secretsmanager:us-east-1:123456789012:secret:*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ssm:GetParameter",
+            "ssm:GetParameters"
+          ],
+          "Resource": "arn:aws:ssm:us-east-1:123456789012:parameter/*"
+        }
+      ]
+    }
+  
+  # Política para replicación cross-region
+  replication-policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "s3:ReplicateObject",
+            "s3:ReplicateDelete",
+            "s3:ObjectOwnerOverrideToBucketOwner",
+            "s3:GetBucketVersioning",
+            "s3:PutBucketVersioning"
+          ],
+          "Resource": [
+            "arn:aws:s3:::primary-cluster-state/*",
+            "arn:aws:s3:::primary-cluster-state"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:DeleteObject"
+          ],
+          "Resource": [
+            "arn:aws:s3:::standby-*-state/*"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ],
+          "Resource": "arn:aws:kms:us-east-1:123456789012:key/replication-key"
+        }
+      ]
+    }
+
+---
+# Configuración de EKS Cluster para cada región
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eks-clusters-config
+  namespace: infrastructure
+data:
+  clusters.yaml: |
+    clusters:
+      primary:
+        name: "primary-cluster"
+        version: "1.28"
+        platform:
+          account: "123456789012"
+          region: "us-east-1"
+          vpc:
+            id: "vpc-0abc12345def67890"
+            cidr: "10.0.0.0/16"
+            public-subnets:
+              - "subnet-public-1a"
+              - "subnet-public-1b"
+              - "subnet-public-1c"
+            private-subnets:
+              - "subnet-private-1a"
+              - "subnet-private-1b"
+              - "subnet-private-1c"
+          cluster-endpoint-access: "private"
+          endpoint-public-access: true
+          public-access-cidrs:
+            - "10.0.0.0/8"
+        networking:
+          service-cidr: "172.16.0.0/16"
+          pod-cidr: "172.16.0.0/12"
+          dns-cluster-ip: "172.16.0.10"
+          core-dns-version: "v1.10.1"
+          vpc-cni-version: "v1.15.4"
+          coredns-addon: "v1.10.1-eksbuild.9"
+        managed-node-groups:
+          system:
+            name: "system-nodes"
+            instance-type: "m6i.xlarge"
+            desired-size: 3
+            min-size: 3
+            max-size: 6
+            volume-size: 100
+            volume-type: "gp3"
+            labels:
+              node-role: "system"
+              workload-type: "critical"
+          applications:
+            name: "app-nodes"
+            instance-type: "m6i.2xlarge"
+            desired-size: 6
+            min-size: 3
+            max-size: 20
+            volume-size: 200
+            volume-type: "gp3"
+            labels:
+              node-role: "application"
+        addons:
+          - name: "vpc-cni"
+            version: "v1.15.4-eksbuild.3"
+            configuration-values: ""
+          - name: "coredns"
+            version: "v1.10.1-eksbuild.9"
+            configuration-values: ""
+          - name: "kube-proxy"
+            version: "v1.28.2-eksbuild.2"
+            configuration-values: ""
+          
+      standby-east:
+        name: "standby-us-east-2"
+        version: "1.28"
+        platform:
+          account: "123456789013"
+          region: "us-east-2"
+          role: "disaster-recovery"
+          vpc:
+            id: "vpc-0abc12345def67891"
+            cidr: "10.1.0.0/16"
+        
+      standby-west:
+        name: "standby-us-west-1"
+        version: "1.28"
+        platform:
+          account: "123456789014"
+          region: "us-west-1"
+          role: "disaster-recovery"
+          vpc:
+            id: "vpc-0abc12345def67892"
+            cidr: "10.2.0.0/16"
+        
+      standby-west-2:
+        name: "standby-us-west-2"
+        version: "1.28"
+        platform:
+          account: "123456789015"
+          region: "us-west-2"
+          role: "disaster-recovery"
+          vpc:
+            id: "vpc-0abc12345def67893"
+            cidr: "10.3.0.0/16"
+
+---
+# Configuración de S3 buckets para estado y replicación
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s3-buckets-config
+  namespace: infrastructure
+data:
+  buckets.yaml: |
+    buckets:
+      primary-state:
+        name: "primary-cluster-state"
+        region: "us-east-1"
+        versioning: true
+        encryption:
+          algorithm: "AES256"
+          kms-key-id: "alias/replication-key"
+        replication:
+          enabled: true
+          destinations:
+            - bucket: "arn:aws:s3:::standby-east-state"
+              region: "us-east-2"
+              storage-class: "STANDARD_IA"
+            - bucket: "arn:aws:s3:::standby-west-state"
+              region: "us-west-1"
+              storage-class: "STANDARD_IA"
+            - bucket: "arn:aws:s3:::standby-west-2-state"
+              region: "us-west-2"
+              storage-class: "STANDARD_IA"
+        lifecycle-rules:
+          - id: "archive-old-states"
+            status: "Enabled"
+            transitions:
+              - days: 30
+                storage-class: "GLACIER"
+              - days: 90
+                storage-class: "DEEP_ARCHIVE"
+            expiration:
+              days: 365
+        
+      standby-east-state:
+        name: "standby-east-state"
+        region: "us-east-2"
+        versioning: true
+        encryption:
+          algorithm: "AES256"
+        
+      standby-west-state:
+        name: "standby-west-state"
+        region: "us-west-1"
+        versioning: true
+        encryption:
+          algorithm: "AES256"
+        
+      standby-west-2-state:
+        name: "standby-west-2-state"
+        region: "us-west-2"
+        versioning: true
+        encryption:
+          algorithm: "AES256"
+        
+      artifacts:
+        name: "control-plane-artifacts"
+        region: "us-east-1"
+        versioning: true
+        public-access-block: true
+        cors:
+          - allowed-origins:
+              - "https://argocd.example.com"
+            allowed-methods:
+              - "GET"
+              - "PUT"
+            allowed-headers:
+              - "*"
+        
+      backup:
+        name: "control-plane-backups"
+        region: "us-east-1"
+        versioning: true
+        encryption:
+          algorithm: "AES256"
+        lifecycle-rules:
+          - id: "delete-old-backups"
+            status: "Enabled"
+            expiration:
+              days: 30

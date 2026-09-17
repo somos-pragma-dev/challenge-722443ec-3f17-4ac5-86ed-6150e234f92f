@@ -1,0 +1,163 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  # Configuración del servidor ArgoCD
+  ui.bannercontent: "Production Multi-Cluster Control Plane - Primary Region: us-east-1"
+  ui.bannerpermanent: "true"
+  ui.bannerposition: "top"
+  
+  # Configuración de recursos
+  resource.customizations: |
+    # Personalización de recursos para Crossplane
+    apiextensions.crossplane.io/CompositeResourceDefinition:
+      health.lua: |
+        local hs = {}
+        hs.status = "Healthy"
+        hs.message = "Composite resource is available"
+        if obj.status ~= nil then
+          if obj.status.conditions ~= nil then
+            for i, condition in ipairs(obj.status.conditions) do
+              if condition.type == "Ready" and condition.status == "False" then
+                hs.status = "Unhealthy"
+                hs.message = condition.message
+                break
+              end
+            end
+          end
+        end
+        return hs
+    
+    # Personalización para Managed Resources de Crossplane
+    apiextensions.apiextensions.k8s.io/CustomResourceDefinition:
+      health.lua: |
+        local hs = {}
+        hs.status = "Healthy"
+        hs.message = "CRD is established"
+        if obj.status ~= nil then
+          if obj.status.conditions ~= nil then
+            for i, condition in ipairs(obj.status.conditions) do
+              if condition.type == "Established" and condition.status == "False" then
+                hs.status = "Degraded"
+                hs.message = condition.message
+              end
+            end
+          end
+        end
+        return hs
+  
+  # Configuración de URL del servidor
+  url: https://argocd.k8s.example.com
+  
+  # Configuración de dex (proveedor OIDC)
+  dex.config: |
+    connectors:
+      - type: github
+        id: github
+        config:
+          orgs:
+            - name: org-engineering
+              teams:
+                - platform
+                - devops
+                - sre
+          clientID: a84c8d2f8e1b4c5d6e7f
+          clientSecret: $dex.github.clientSecret
+      - type: oidc
+        id: okta
+        config:
+          issuer: https://org.okta.com
+          clientID: 0oa3i8j9d8e7f6g5h4i
+          clientSecret: $dex.okta.clientSecret
+          requestedScopes:
+            - openid
+            - profile
+            - email
+            - groups
+  
+  # Políticas de gestión de aplicaciones
+  policy.csv: |
+    # Política base: admins pueden hacer todo
+    g, org-engineering:platform, role:admin
+    g, org-engineering:devops, role:admin
+    
+    # SRE puede gestionar infraestructura
+    g, org-sre:sre-team, role:infra-manager
+    
+    # Desarrolladores pueden ver y crear aplicaciones en development
+    g, org-engineering:developers, role:developer
+    
+    # Auditores solo pueden leer
+    g, org-audit:auditors, role:readonly
+    
+    # Definición de roles
+    p, role:admin, *, *, *, *
+    p, role:infra-manager, *, *, create, /infrastructure/*
+    p, role:developer, *, *, create, /applications/development/*
+    p, role:readonly, *, *, get, *
+    
+    # Políticas de sync por entorno
+    g, org-engineering:platform, policy:*, *, *, *
+    g, org-sre:sre-team, policy:sync-mode, *, manual, *
+    g, org-engineering:developers, policy:sync-mode, *, auto, /applications/development/*
+  
+  # Configuración de repositorio
+  repository.credentials: |
+    - url: https://github.com/org/multi-cluster-gitops
+      type: git
+      name: gitops-repository
+      sshPrivateKeySecret:
+        key: ssh-private-key
+        name: argocd-repo-creds
+  
+  # Configuración de notificaciones
+  notifications.enabled: "true"
+  notifications.secretName: argocd-notifications-secret
+  
+  # Configuración de TLS
+  tls.config: |
+    - {}
+  
+  # Configuración de exec hook
+  exec.enabled: "true"
+  exec.shell: /bin/bash
+  
+  # Resource tracking method
+  resource Tracking Method: annotation
+  
+  # Ignore missing manifests
+  resource.compareoptions: |
+    ignoreMissingSchemas: "true"
+    ignoreDifferences: |
+      - group: ""
+        kind: "ServiceAccount"
+        jsonPointers:
+          - /secrets
+      - group: "apps"
+        kind: "Deployment"
+        jsonPointers:
+          - /spec/replicas
+  
+  # Configuración de aplicación set
+  application.instanceLabelKey: app.kubernetes.io/instance
+  
+  # Configuración de diffing
+  resource.customizations.ignoreDifferences.admissionregistration.k8s.io/MutatingWebhookConfiguration: |
+    - jsonPointers:
+        - /webhooks/0/clientConfig/caBundle
+  
+  # Configuración de cluster scoped
+  application.scopeelector: |
+    matchExpressions:
+      - key: environment
+        operator: In
+        values:
+          - production
+          - staging
+          - development
+---
